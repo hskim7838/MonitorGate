@@ -1,7 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Text;
+using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Threading;
 
 namespace MonitorGate
 {
@@ -37,6 +41,20 @@ namespace MonitorGate
             Test("preferences tolerate unknown and malformed values", PreferencesMalformed);
             Test("invalid preferences preserve existing file", PreferencesInvalidSave);
             Test("preferences IO failure is surfaced with no partial file", PreferencesWriteFailure);
+            Test("legacy settings preserve options and use default badge colors", PreferencesLegacyColors);
+            Test("badge RGB colors persist independently and overwrite", PreferencesColorRoundTrips);
+            Test("badge color parser accepts lower and mixed case six digit RGB", PreferencesColorCase);
+            Test("malformed badge color falls back for that field only", PreferencesInvalidColorText);
+            Test("nonopaque badge colors are rejected before writing", PreferencesInvalidColorSave);
+            Test("font and layout preferences round trip under non-dot culture", PreferencesAppearanceRoundTrips);
+            Test("invalid appearance values default each field independently", PreferencesInvalidAppearanceText);
+            Test("invalid appearance save is rejected without changing file", PreferencesInvalidAppearanceSave);
+            Test("installed font list is sorted and contains supported families", FontInventory);
+            Test("missing font resolves explicitly to a supported sans serif", FontFallback);
+            Test("font creation supports available regular and bold styles", FontStyles);
+            Test("font points and box metrics scale with DPI", AppearanceMetrics);
+            Test("manual boxes honor requested size and minimum text padding", AppearanceManualMinimum);
+            Test("actual badge and preview share monitor size limits", AppearanceFitMonitor);
             Test("badge requires transfer permission plus actual movement", MotionRequiresPermission);
             Test("badge hides at precise idle boundary and restarts on movement", MotionIdleBoundary);
             Test("badge setting and key release clear recent motion", MotionHideResets);
@@ -403,6 +421,9 @@ namespace MonitorGate
             Equal(TransferKey.Ctrl, settings.TransferKey, "default transfer key");
             Equal(true, settings.StartEnabled, "default starts gate enabled");
             Equal(true, settings.ShowOverlay, "default overlay enabled");
+            Equal(Color.Black.ToArgb(), settings.OverlayBackground.ToArgb(), "default overlay background black");
+            Equal(Color.White.ToArgb(), settings.OverlayForeground.ToArgb(), "default overlay foreground white");
+            AppearanceDefaults(settings);
             Equal(false, File.Exists(path), "load does not create settings file");
         }
 
@@ -458,6 +479,346 @@ namespace MonitorGate
             ThrowsOf<IOException>(delegate { store.Save(new UserPreferences()); }, "directory creation failure surfaced");
             Equal("existing file", File.ReadAllText(blocked), "IO failure preserves blocking file");
             Equal(false, File.Exists(path), "IO failure does not write unrelated settings fixture");
+        }
+
+        private static void PreferencesLegacyColors()
+        {
+            string path = PreferencesFixture();
+            File.WriteAllText(path, "TransferKey=Alt\nStartEnabled=False\nShowOverlay=False\n", Encoding.UTF8);
+            UserPreferences loaded = new PreferencesStore(path).Load();
+            Equal(TransferKey.Alt, loaded.TransferKey, "legacy transfer key preserved");
+            Equal(false, loaded.StartEnabled, "legacy enabled flag preserved");
+            Equal(false, loaded.ShowOverlay, "legacy overlay flag preserved");
+            Equal(Color.Black.ToArgb(), loaded.OverlayBackground.ToArgb(), "missing background uses black");
+            Equal(Color.White.ToArgb(), loaded.OverlayForeground.ToArgb(), "missing foreground uses white");
+            AppearanceDefaults(loaded);
+        }
+
+        private static void PreferencesColorRoundTrips()
+        {
+            string path = PreferencesFixture();
+            PreferencesStore store = new PreferencesStore(path);
+            Color[] palette = new Color[] { Color.Black, Color.White, Color.FromArgb(0, 255, 10),
+                Color.FromArgb(171, 205, 239), Color.FromArgb(1, 127, 254) };
+            foreach (Color background in palette)
+                foreach (Color foreground in palette)
+                {
+                    store.Save(new UserPreferences { TransferKey = TransferKey.Shift, StartEnabled = false,
+                        OverlayBackground = background, OverlayForeground = foreground });
+                    UserPreferences loaded = new PreferencesStore(path).Load();
+                    Equal(background.ToArgb(), loaded.OverlayBackground.ToArgb(), "RGB background survives round trip");
+                    Equal(foreground.ToArgb(), loaded.OverlayForeground.ToArgb(), "RGB foreground survives round trip");
+                    Equal(255, (int)loaded.OverlayBackground.A, "loaded background opaque");
+                    Equal(255, (int)loaded.OverlayForeground.A, "loaded foreground opaque");
+                    Equal(TransferKey.Shift, loaded.TransferKey, "color save preserves other options");
+                }
+            store.Save(new UserPreferences { OverlayBackground = Color.FromArgb(0, 255, 10),
+                OverlayForeground = Color.FromArgb(171, 205, 239) });
+            string saved = File.ReadAllText(path);
+            Equal(true, saved.Contains("OverlayBackground=#00FF0A" + Environment.NewLine), "background has exact uppercase six digit RGB");
+            Equal(true, saved.Contains("OverlayForeground=#ABCDEF" + Environment.NewLine), "foreground has exact uppercase six digit RGB");
+            Equal(1, Directory.GetFiles(Path.GetDirectoryName(path)).Length, "color overwrites leave no temporary files");
+        }
+
+        private static void PreferencesColorCase()
+        {
+            string path = PreferencesFixture();
+            File.WriteAllText(path, "OverlayBackground=#ab09ef\nOverlayForeground=#aBcDeF\n", Encoding.UTF8);
+            UserPreferences loaded = new PreferencesStore(path).Load();
+            Equal(Color.FromArgb(171, 9, 239).ToArgb(), loaded.OverlayBackground.ToArgb(), "lowercase RGB accepted");
+            Equal(Color.FromArgb(171, 205, 239).ToArgb(), loaded.OverlayForeground.ToArgb(), "mixed case RGB accepted");
+            Equal(255, (int)loaded.OverlayBackground.A, "lowercase background has implicit full alpha");
+            Equal(255, (int)loaded.OverlayForeground.A, "mixed case foreground has implicit full alpha");
+        }
+
+        private static void PreferencesInvalidColorText()
+        {
+            string path = PreferencesFixture();
+            string[] invalid = new string[] { "", "Black", "123456", "#123", "#12345", "#1234567",
+                "#80123456", "#GG0011", "#12 456", "#+00123", "#-00123", "#１２３４５６", "#12345Z" };
+            foreach (string value in invalid)
+            {
+                File.WriteAllText(path, "TransferKey=RightCtrl\nStartEnabled=False\nShowOverlay=False\n" +
+                    "OverlayBackground=" + value + "\nOverlayForeground=#123456\n", Encoding.UTF8);
+                UserPreferences loaded = new PreferencesStore(path).Load();
+                Equal(Color.Black.ToArgb(), loaded.OverlayBackground.ToArgb(), "invalid background defaults: " + value);
+                Equal(Color.FromArgb(18, 52, 86).ToArgb(), loaded.OverlayForeground.ToArgb(), "valid foreground independent of invalid background");
+                Equal(TransferKey.RightCtrl, loaded.TransferKey, "invalid color preserves transfer key");
+                Equal(false, loaded.StartEnabled, "invalid color preserves enabled flag");
+                Equal(false, loaded.ShowOverlay, "invalid color preserves overlay flag");
+                File.WriteAllText(path, "OverlayBackground=#123456\nOverlayForeground=" + value + "\n", Encoding.UTF8);
+                loaded = new PreferencesStore(path).Load();
+                Equal(Color.FromArgb(18, 52, 86).ToArgb(), loaded.OverlayBackground.ToArgb(), "valid background independent of invalid foreground");
+                Equal(Color.White.ToArgb(), loaded.OverlayForeground.ToArgb(), "invalid foreground defaults: " + value);
+            }
+        }
+
+        private static void PreferencesInvalidColorSave()
+        {
+            string path = PreferencesFixture();
+            PreferencesStore store = new PreferencesStore(path);
+            store.Save(new UserPreferences { OverlayBackground = Color.FromArgb(10, 20, 30),
+                OverlayForeground = Color.FromArgb(210, 220, 230) });
+            string original = File.ReadAllText(path);
+            Color[] invalid = new Color[] { Color.Empty, Color.Transparent, Color.FromArgb(0, 10, 20, 30),
+                Color.FromArgb(1, 10, 20, 30), Color.FromArgb(254, 10, 20, 30) };
+            foreach (Color color in invalid)
+            {
+                Color captured = color;
+                ThrowsOf<ArgumentException>(delegate { store.Save(new UserPreferences { OverlayBackground = captured }); }, "invalid background rejected");
+                Equal(original, File.ReadAllText(path), "invalid background preserves existing settings");
+                ThrowsOf<ArgumentException>(delegate { store.Save(new UserPreferences { OverlayForeground = captured }); }, "invalid foreground rejected");
+                Equal(original, File.ReadAllText(path), "invalid foreground preserves existing settings");
+            }
+            Equal(1, Directory.GetFiles(Path.GetDirectoryName(path)).Length, "invalid colors create no temporary files");
+            string absentDirectory = Path.Combine(Path.GetDirectoryName(path), "must-not-create");
+            PreferencesStore absentStore = new PreferencesStore(Path.Combine(absentDirectory, "settings.ini"));
+            ThrowsOf<ArgumentException>(delegate { absentStore.Save(new UserPreferences { OverlayForeground = Color.Empty }); }, "invalid color rejected before creating directory");
+            Equal(false, Directory.Exists(absentDirectory), "invalid save has no directory side effect");
+        }
+
+        private static void AppearanceDefaults(UserPreferences preferences)
+        {
+            Equal("Segoe UI", preferences.OverlayFontName, "default font family");
+            Equal(9.75f, preferences.OverlayFontSize, "default point size preserves 13px at 96 DPI");
+            Equal(false, preferences.OverlayFontBold, "default regular font");
+            Equal(true, preferences.OverlayAutoSize, "default automatic box size");
+            Equal(224, preferences.OverlayWidth, "default manual width");
+            Equal(28, preferences.OverlayHeight, "default manual height");
+        }
+
+        private static void PreferencesAppearanceRoundTrips()
+        {
+            string path = PreferencesFixture();
+            PreferencesStore store = new PreferencesStore(path);
+            CultureInfo previous = Thread.CurrentThread.CurrentCulture;
+            try
+            {
+                Thread.CurrentThread.CurrentCulture = new CultureInfo("fr-FR");
+                foreach (float size in new float[] { 6, 9.75f, 48 })
+                    foreach (bool bold in new bool[] { false, true })
+                        foreach (bool automatic in new bool[] { false, true })
+                        {
+                            UserPreferences requested = new UserPreferences { OverlayFontName = "Saved = Missing Font",
+                                OverlayFontSize = size, OverlayFontBold = bold, OverlayAutoSize = automatic,
+                                OverlayWidth = automatic ? 48 : 1600, OverlayHeight = automatic ? 20 : 400 };
+                            store.Save(requested);
+                            UserPreferences loaded = new PreferencesStore(path).Load();
+                            Equal(requested.OverlayFontName, loaded.OverlayFontName, "font name including equals preserved");
+                            Equal(size, loaded.OverlayFontSize, "point size survives culture independent round trip");
+                            Equal(bold, loaded.OverlayFontBold, "bold choice survives round trip");
+                            Equal(automatic, loaded.OverlayAutoSize, "auto/manual choice survives round trip");
+                            Equal(requested.OverlayWidth, loaded.OverlayWidth, "manual width survives round trip");
+                            Equal(requested.OverlayHeight, loaded.OverlayHeight, "manual height survives round trip");
+                        }
+                store.Save(new UserPreferences { OverlayFontSize = 9.75f, OverlayFontName = new string('a', 128) });
+                Equal(true, File.ReadAllText(path).Contains("OverlayFontSize=9.75" + Environment.NewLine), "fractional size uses invariant decimal dot");
+                Equal(128, store.Load().OverlayFontName.Length, "maximum name length accepted");
+                Equal(1, Directory.GetFiles(Path.GetDirectoryName(path)).Length, "appearance overwrite leaves no temporary files");
+            }
+            finally { Thread.CurrentThread.CurrentCulture = previous; }
+        }
+
+        private static void PreferencesInvalidAppearanceText()
+        {
+            string path = PreferencesFixture();
+            PreferencesStore store = new PreferencesStore(path);
+            string[] badNames = new string[] { "", " ", new string('x', 129), "Font\0Name", "Font\tName", "\tFont", "Font\t" };
+            foreach (string value in badNames)
+            {
+                File.WriteAllText(path, "OverlayFontName=" + value + "\nOverlayFontSize=12.5\nOverlayWidth=500\n", Encoding.UTF8);
+                UserPreferences loaded = store.Load();
+                Equal("Segoe UI", loaded.OverlayFontName, "invalid name defaults");
+                Equal(12.5f, loaded.OverlayFontSize, "invalid name preserves valid size");
+                Equal(500, loaded.OverlayWidth, "invalid name preserves valid width");
+            }
+            foreach (string value in new string[] { "NaN", "Infinity", "-Infinity", "5.99", "48.01", "9,75", "1e99", "bad" })
+            {
+                File.WriteAllText(path, "OverlayFontName=Consolas\nOverlayFontSize=" + value + "\nOverlayFontBold=True\n", Encoding.UTF8);
+                UserPreferences loaded = store.Load();
+                Equal(9.75f, loaded.OverlayFontSize, "invalid font size defaults: " + value);
+                Equal("Consolas", loaded.OverlayFontName, "invalid size preserves name");
+                Equal(true, loaded.OverlayFontBold, "invalid size preserves bold flag");
+            }
+            File.WriteAllText(path, "OverlayFontBold=maybe\nOverlayAutoSize=0\nOverlayWidth=47\nOverlayHeight=401\n", Encoding.UTF8);
+            AppearanceDefaults(store.Load());
+            foreach (string value in new string[] { "1601", "-1", "1.5", "NaN", "2147483648" })
+            {
+                File.WriteAllText(path, "OverlayWidth=" + value + "\nOverlayHeight=40\n", Encoding.UTF8);
+                Equal(224, store.Load().OverlayWidth, "invalid width defaults: " + value);
+                Equal(40, store.Load().OverlayHeight, "invalid width preserves height");
+            }
+            foreach (string value in new string[] { "19", "-1", "1.5", "NaN", "2147483648" })
+            {
+                File.WriteAllText(path, "OverlayWidth=500\nOverlayHeight=" + value + "\n", Encoding.UTF8);
+                Equal(28, store.Load().OverlayHeight, "invalid height defaults: " + value);
+                Equal(500, store.Load().OverlayWidth, "invalid height preserves width");
+            }
+        }
+
+        private static void PreferencesInvalidAppearanceSave()
+        {
+            string path = PreferencesFixture();
+            PreferencesStore store = new PreferencesStore(path);
+            store.Save(new UserPreferences { OverlayFontName = "Consolas", OverlayFontSize = 12.5f, OverlayWidth = 500 });
+            string original = File.ReadAllText(path);
+            Action<UserPreferences>[] invalid = new Action<UserPreferences>[] {
+                delegate(UserPreferences p) { p.OverlayFontName = null; },
+                delegate(UserPreferences p) { p.OverlayFontName = ""; },
+                delegate(UserPreferences p) { p.OverlayFontName = new string('x', 129); },
+                delegate(UserPreferences p) { p.OverlayFontName = "Font\r\nInjected=True"; },
+                delegate(UserPreferences p) { p.OverlayFontName = "Font\0Name"; },
+                delegate(UserPreferences p) { p.OverlayFontName = "Font\tName"; },
+                delegate(UserPreferences p) { p.OverlayFontSize = Single.NaN; },
+                delegate(UserPreferences p) { p.OverlayFontSize = Single.PositiveInfinity; },
+                delegate(UserPreferences p) { p.OverlayFontSize = Single.NegativeInfinity; },
+                delegate(UserPreferences p) { p.OverlayFontSize = 5.99f; },
+                delegate(UserPreferences p) { p.OverlayFontSize = 48.01f; },
+                delegate(UserPreferences p) { p.OverlayWidth = 47; },
+                delegate(UserPreferences p) { p.OverlayWidth = 1601; },
+                delegate(UserPreferences p) { p.OverlayHeight = 19; },
+                delegate(UserPreferences p) { p.OverlayHeight = 401; }
+            };
+            foreach (Action<UserPreferences> mutate in invalid)
+            {
+                UserPreferences invalidPreferences = new UserPreferences();
+                mutate(invalidPreferences);
+                ThrowsOf<ArgumentException>(delegate { store.Save(invalidPreferences); }, "invalid appearance rejected");
+                Equal(original, File.ReadAllText(path), "invalid appearance preserves saved file");
+            }
+            Equal(1, Directory.GetFiles(Path.GetDirectoryName(path)).Length, "invalid appearance leaves no temporary files");
+            string directory = Path.Combine(Path.GetDirectoryName(path), "must-not-create-appearance");
+            PreferencesStore absent = new PreferencesStore(Path.Combine(directory, "settings.ini"));
+            ThrowsOf<ArgumentException>(delegate { absent.Save(new UserPreferences { OverlayFontSize = Single.NaN }); }, "invalid size rejected before creating directory");
+            Equal(false, Directory.Exists(directory), "invalid appearance has no directory side effect");
+        }
+
+        private static void FontInventory()
+        {
+            string[] names = OverlayAppearance.AvailableFontNames();
+            Equal(true, names.Length > 0, "installed font inventory nonempty");
+            for (int i = 0; i < names.Length; i++)
+            {
+                if (i > 0) Equal(true, StringComparer.OrdinalIgnoreCase.Compare(names[i - 1], names[i]) < 0, "font names sorted and unique");
+                using (FontFamily family = new FontFamily(names[i]))
+                    Equal(true, family.IsStyleAvailable(FontStyle.Regular) || family.IsStyleAvailable(FontStyle.Bold), "listed family has a usable style");
+            }
+            Console.WriteLine("Installed usable font families: " + names.Length);
+        }
+
+        private static void FontFallback()
+        {
+            string fallback = OverlayAppearance.ResolveFontName("MonitorGate Missing Font " + Guid.NewGuid().ToString("N"));
+            string expected;
+            try { using (FontFamily segoe = new FontFamily("Segoe UI")) expected = segoe.Name; }
+            catch (ArgumentException) { using (FontFamily generic = FontFamily.GenericSansSerif) expected = generic.Name; }
+            Equal(expected, fallback, "missing font explicitly resolves to known fallback");
+            using (Font font = OverlayAppearance.CreateFont(new UserPreferences { OverlayFontName = "Missing Font Fixture" }, 1))
+                Equal(expected, font.FontFamily.Name, "font actually created with fallback family");
+            string resolved = OverlayAppearance.ResolveFontName(expected.ToLowerInvariant());
+            Equal(expected, resolved, "font resolution accepts different case");
+        }
+
+        private static void FontStyles()
+        {
+            Equal(FontStyle.Regular, OverlayAppearance.SelectFontStyle(true, true, false), "bold unavailable selects available regular");
+            Equal(FontStyle.Bold, OverlayAppearance.SelectFontStyle(false, false, true), "regular unavailable selects available bold");
+            Equal(FontStyle.Bold, OverlayAppearance.SelectFontStyle(true, true, true), "bold preference honored when available");
+            Equal(FontStyle.Regular, OverlayAppearance.SelectFontStyle(false, true, true), "regular preference honored when available");
+            ThrowsOf<ArgumentException>(delegate { OverlayAppearance.SelectFontStyle(false, false, false); }, "font without usable styles rejected");
+            string[] names = OverlayAppearance.AvailableFontNames();
+            string regularOnly = null, boldOnly = null;
+            foreach (string name in names)
+                using (FontFamily family = new FontFamily(name))
+                {
+                    bool regular = family.IsStyleAvailable(FontStyle.Regular), bold = family.IsStyleAvailable(FontStyle.Bold);
+                    Equal(bold, OverlayAppearance.SupportsBold(name), "bold capability reflects family metadata");
+                    if (regular && !bold && regularOnly == null) regularOnly = name;
+                    if (!regular && bold && boldOnly == null) boldOnly = name;
+                }
+            foreach (bool bold in new bool[] { false, true })
+                using (Font font = OverlayAppearance.CreateFont(new UserPreferences { OverlayFontBold = bold }, 1))
+                    Equal(true, font.FontFamily.IsStyleAvailable(font.Style), "created font has a supported style");
+            if (regularOnly != null)
+                using (Font font = OverlayAppearance.CreateFont(new UserPreferences { OverlayFontName = regularOnly, OverlayFontBold = true }, 1))
+                    Equal(FontStyle.Regular, font.Style, "requested unavailable bold falls back to regular");
+            else Console.WriteLine("NOTE: no installed regular-only family to exercise unavailable Bold");
+            if (boldOnly != null)
+                using (Font font = OverlayAppearance.CreateFont(new UserPreferences { OverlayFontName = boldOnly, OverlayFontBold = false }, 1))
+                    Equal(FontStyle.Bold, font.Style, "requested unavailable regular falls back to bold");
+            else Console.WriteLine("NOTE: no installed bold-only family to exercise unavailable Regular");
+        }
+
+        private static void AppearanceMetrics()
+        {
+            UserPreferences preferences = new UserPreferences();
+            using (Font font = OverlayAppearance.CreateFont(preferences, 1))
+            {
+                Equal(GraphicsUnit.Pixel, font.Unit, "render font uses explicit pixels");
+                Equal(13f, font.Size, "9.75pt maps to 13px at 96 DPI");
+            }
+            using (Font font = OverlayAppearance.CreateFont(preferences, 1.5f)) Equal(19.5f, font.Size, "font scales for 144 DPI");
+            Size baseline = OverlayAppearance.MeasureBox(preferences, 1);
+            Size largerDpi = OverlayAppearance.MeasureBox(preferences, 1.5f);
+            Equal(true, largerDpi.Width > baseline.Width && largerDpi.Height > baseline.Height, "automatic box increases with DPI");
+            RenderTextFits(preferences, baseline, 1);
+            RenderTextFits(preferences, largerDpi, 1.5f);
+            preferences.OverlayFontSize = 48;
+            preferences.OverlayFontBold = true;
+            Size largerFont = OverlayAppearance.MeasureBox(preferences, 1);
+            Equal(true, largerFont.Width > baseline.Width && largerFont.Height > baseline.Height, "automatic box increases for larger bold text");
+            RenderTextFits(preferences, largerFont, 1);
+            ThrowsOf<ArgumentOutOfRangeException>(delegate { OverlayAppearance.CreateFont(preferences, 0); }, "zero DPI scale rejected");
+        }
+
+        private static void AppearanceManualMinimum()
+        {
+            UserPreferences preferences = new UserPreferences { OverlayAutoSize = false, OverlayWidth = 1000, OverlayHeight = 200 };
+            Equal(new Size(1000, 200), OverlayAppearance.MeasureBox(preferences, 1), "larger manual dimensions honored");
+            Equal(new Size(1500, 300), OverlayAppearance.MeasureBox(preferences, 1.5f), "manual dimensions are logical 96 DPI pixels");
+            preferences.OverlayWidth = 48;
+            preferences.OverlayHeight = 20;
+            preferences.OverlayFontSize = 48;
+            Size safe = OverlayAppearance.MeasureBox(preferences, 1);
+            Equal(true, safe.Width > 48 && safe.Height > 20, "small manual box expanded for large text");
+            RenderTextFits(preferences, safe, 1);
+        }
+
+        private static void RenderTextFits(UserPreferences preferences, Size box, float scale)
+        {
+            using (Bitmap bitmap = new Bitmap(box.Width, box.Height))
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Black);
+                preferences.OverlayForeground = Color.White;
+                TextRenderingHint previous = graphics.TextRenderingHint;
+                OverlayAppearance.DrawText(graphics, new Rectangle(System.Drawing.Point.Empty, box), preferences, scale);
+                Equal(previous, graphics.TextRenderingHint, "draw restores caller rendering hint");
+                int minX = box.Width, minY = box.Height, maxX = -1, maxY = -1, text = 0;
+                for (int y = 0; y < bitmap.Height; y++)
+                    for (int x = 0; x < bitmap.Width; x++)
+                    {
+                        Color pixel = bitmap.GetPixel(x, y);
+                        if (pixel.R <= 20 && pixel.G <= 20 && pixel.B <= 20) continue;
+                        minX = Math.Min(minX, x); minY = Math.Min(minY, y);
+                        maxX = Math.Max(maxX, x); maxY = Math.Max(maxY, y); text++;
+                    }
+                Equal(true, text > 100, "measured box renders visible text");
+                Equal(true, minX > 2 && minY > 1 && maxX < box.Width - 3 && maxY < box.Height - 2,
+                    "rendered glyphs have safe margins on every side");
+            }
+        }
+
+        private static void AppearanceFitMonitor()
+        {
+            Equal(new Size(1280, 284), OverlayAppearance.FitToMonitor(new Size(1600, 400), new Rectangle(-1280, 0, 1280, 300), 1),
+                "oversize badge fits monitor width and top margin");
+            Equal(new Size(100, 200), OverlayAppearance.FitToMonitor(new Size(100, 200), new Rectangle(0, 0, 1280, 720), 1.5f),
+                "fitting badge keeps its requested dimensions");
+            Equal(new Size(1280, 276), OverlayAppearance.FitToMonitor(new Size(2000, 500), new Rectangle(0, 0, 1280, 300), 1.5f),
+                "top margin scales at 144 DPI");
+            Equal(new Size(1, 1), OverlayAppearance.FitToMonitor(new Size(20, 20), Rectangle.Empty, 1),
+                "empty monitor bounds remain at least one pixel");
         }
 
         private static Point P(int x, int y) { return new Point { X = x, Y = y }; }

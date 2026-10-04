@@ -13,8 +13,9 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("MonitorGate")]
 [assembly: AssemblyDescription("Hold Ctrl to move the pointer between monitors")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]
 
 namespace MonitorGate
 {
@@ -520,6 +521,8 @@ namespace MonitorGate
     internal sealed class TransferOverlay : Form
     {
         private float scale = 1;
+        private UserPreferences appearance = new UserPreferences();
+        private Size desiredSize;
         internal TransferOverlay()
         {
             FormBorderStyle = FormBorderStyle.None;
@@ -527,9 +530,45 @@ namespace MonitorGate
             TopMost = true;
             AutoScaleMode = AutoScaleMode.None;
             BackColor = Color.Black;
+            ForeColor = Color.White;
             Opacity = 1.0;
             DoubleBuffered = true;
-            Size = new Size(224, 28);
+            RecalculateSize();
+        }
+        internal void ApplyAppearance(UserPreferences preferences)
+        {
+            if (preferences == null) throw new ArgumentNullException("preferences");
+            if (preferences.OverlayBackground.A != 255 || preferences.OverlayForeground.A != 255)
+                throw new ArgumentException("상태 박스에는 불투명한 색상을 사용해야 합니다.");
+            appearance = new UserPreferences
+            {
+                OverlayBackground = preferences.OverlayBackground,
+                OverlayForeground = preferences.OverlayForeground,
+                OverlayFontName = preferences.OverlayFontName,
+                OverlayFontSize = preferences.OverlayFontSize,
+                OverlayFontBold = preferences.OverlayFontBold,
+                OverlayAutoSize = preferences.OverlayAutoSize,
+                OverlayWidth = preferences.OverlayWidth,
+                OverlayHeight = preferences.OverlayHeight
+            };
+            ApplyColors(appearance.OverlayBackground, appearance.OverlayForeground);
+            RecalculateSize();
+        }
+        private void RecalculateSize()
+        {
+            desiredSize = OverlayAppearance.MeasureBox(appearance, scale);
+            Size = desiredSize;
+            Invalidate();
+        }
+        internal void ApplyColors(Color background, Color foreground)
+        {
+            if (background.A != 255 || foreground.A != 255)
+                throw new ArgumentException("상태 박스에는 불투명한 색상을 사용해야 합니다.");
+            appearance.OverlayBackground = background;
+            appearance.OverlayForeground = foreground;
+            BackColor = background;
+            ForeColor = foreground;
+            Invalidate();
         }
         protected override void OnHandleCreated(EventArgs e)
         {
@@ -576,9 +615,12 @@ namespace MonitorGate
                 if (nextScale != scale)
                 {
                     scale = nextScale;
-                    Size = new Size((int)(224 * scale), (int)(28 * scale));
-                    Invalidate();
+                    RecalculateSize();
                 }
+                // Restore the requested size on larger monitors; keep the box within smaller ones.
+                Size fitted = OverlayAppearance.FitToMonitor(desiredSize,
+                    new Rectangle(bounds.Left, bounds.Top, bounds.Right - bounds.Left, bounds.Bottom - bounds.Top), scale);
+                if (Size != fitted) { Size = fitted; Invalidate(); }
                 Location = new System.Drawing.Point(bounds.Left + (bounds.Right - bounds.Left - Width) / 2,
                     bounds.Top + (int)(16 * scale));
                 if (!Visible) Show();
@@ -588,17 +630,7 @@ namespace MonitorGate
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            using (Font font = new Font("Segoe UI", 13 * scale, FontStyle.Regular, GraphicsUnit.Pixel))
-            using (Brush text = new SolidBrush(Color.White))
-            using (StringFormat format = new StringFormat())
-            {
-                format.Alignment = StringAlignment.Center;
-                format.LineAlignment = StringAlignment.Center;
-                e.Graphics.DrawString("Pointer movement enabled", font, text,
-                    new RectangleF(0, 0, Width, Height), format);
-            }
+            OverlayAppearance.DrawText(e.Graphics, ClientRectangle, appearance, scale);
         }
         protected override void OnSizeChanged(EventArgs e)
         {
@@ -697,6 +729,7 @@ namespace MonitorGate
             tray.DoubleClick += delegate { TogglePause(); };
             worker.StopRequested += RequestClose;
             overlay = new TransferOverlay();
+            overlay.ApplyAppearance(preferences);
             overlayTimer = new System.Windows.Forms.Timer();
             overlayTimer.Interval = 25;
             overlayTimer.Tick += UpdateOverlay;
@@ -710,7 +743,15 @@ namespace MonitorGate
         private UserPreferences CopyPreferences()
         {
             return new UserPreferences { TransferKey = preferences.TransferKey,
-                StartEnabled = preferences.StartEnabled, ShowOverlay = preferences.ShowOverlay };
+                StartEnabled = preferences.StartEnabled, ShowOverlay = preferences.ShowOverlay,
+                OverlayBackground = preferences.OverlayBackground,
+                OverlayForeground = preferences.OverlayForeground,
+                OverlayFontName = preferences.OverlayFontName,
+                OverlayFontSize = preferences.OverlayFontSize,
+                OverlayFontBold = preferences.OverlayFontBold,
+                OverlayAutoSize = preferences.OverlayAutoSize,
+                OverlayWidth = preferences.OverlayWidth,
+                OverlayHeight = preferences.OverlayHeight };
         }
         private bool SavePreferences(UserPreferences next)
         {
@@ -718,6 +759,7 @@ namespace MonitorGate
             {
                 preferencesStore.Save(next);
                 preferences = next;
+                overlay.ApplyAppearance(next);
                 overlayItem.Checked = next.ShowOverlay;
                 if (!next.ShowOverlay) { motion.Reset(); overlay.Hide(); }
                 return true;

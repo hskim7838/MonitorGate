@@ -1,4 +1,6 @@
 using System;
+using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using Microsoft.Win32;
@@ -10,6 +12,14 @@ namespace MonitorGate
         internal TransferKey TransferKey = TransferKey.Ctrl;
         internal bool StartEnabled = true;
         internal bool ShowOverlay = true;
+        internal Color OverlayBackground = Color.Black;
+        internal Color OverlayForeground = Color.White;
+        internal string OverlayFontName = "Segoe UI";
+        internal float OverlayFontSize = 9.75f;
+        internal bool OverlayFontBold = false;
+        internal bool OverlayAutoSize = true;
+        internal int OverlayWidth = 224;
+        internal int OverlayHeight = 28;
     }
 
     internal sealed class PreferencesStore
@@ -30,13 +40,28 @@ namespace MonitorGate
                 int separator = line.IndexOf('=');
                 if (separator < 0) continue;
                 string key = line.Substring(0, separator).Trim();
-                string value = line.Substring(separator + 1).Trim();
+                string rawValue = line.Substring(separator + 1);
+                string value = rawValue.Trim();
                 TransferKey transfer;
                 bool flag;
+                Color color;
+                float fontSize;
+                int dimension;
                 if (key == "TransferKey" && Enum.TryParse<TransferKey>(value, true, out transfer) &&
                     Enum.IsDefined(typeof(TransferKey), transfer)) preferences.TransferKey = transfer;
                 if (key == "StartEnabled" && Boolean.TryParse(value, out flag)) preferences.StartEnabled = flag;
                 if (key == "ShowOverlay" && Boolean.TryParse(value, out flag)) preferences.ShowOverlay = flag;
+                if (key == "OverlayBackground" && TryParseColor(value, out color)) preferences.OverlayBackground = color;
+                if (key == "OverlayForeground" && TryParseColor(value, out color)) preferences.OverlayForeground = color;
+                if (key == "OverlayFontName" && IsValidFontName(value) && !HasControl(rawValue)) preferences.OverlayFontName = value;
+                if (key == "OverlayFontSize" && Single.TryParse(value, NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out fontSize) && IsValidFontSize(fontSize)) preferences.OverlayFontSize = fontSize;
+                if (key == "OverlayFontBold" && Boolean.TryParse(value, out flag)) preferences.OverlayFontBold = flag;
+                if (key == "OverlayAutoSize" && Boolean.TryParse(value, out flag)) preferences.OverlayAutoSize = flag;
+                if (key == "OverlayWidth" && Int32.TryParse(value, NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out dimension) && dimension >= 48 && dimension <= 1600) preferences.OverlayWidth = dimension;
+                if (key == "OverlayHeight" && Int32.TryParse(value, NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out dimension) && dimension >= 20 && dimension <= 400) preferences.OverlayHeight = dimension;
             }
             return preferences;
         }
@@ -44,11 +69,26 @@ namespace MonitorGate
         {
             if (!Enum.IsDefined(typeof(TransferKey), preferences.TransferKey))
                 throw new ArgumentException("지원하지 않는 이동 키입니다.");
+            ValidateColor(preferences.OverlayBackground);
+            ValidateColor(preferences.OverlayForeground);
+            if (!IsValidFontName(preferences.OverlayFontName)) throw new ArgumentException("지원하지 않는 글꼴 이름입니다.");
+            if (!IsValidFontSize(preferences.OverlayFontSize)) throw new ArgumentException("글자 크기는 6~48pt 범위여야 합니다.");
+            if (preferences.OverlayWidth < 48 || preferences.OverlayWidth > 1600 ||
+                preferences.OverlayHeight < 20 || preferences.OverlayHeight > 400)
+                throw new ArgumentException("상태 박스 너비는 48~1600px, 높이는 20~400px 범위여야 합니다.");
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             string text = "TransferKey=" + preferences.TransferKey + Environment.NewLine +
                 "StartEnabled=" + preferences.StartEnabled + Environment.NewLine +
-                "ShowOverlay=" + preferences.ShowOverlay + Environment.NewLine;
+                "ShowOverlay=" + preferences.ShowOverlay + Environment.NewLine +
+                "OverlayBackground=" + FormatColor(preferences.OverlayBackground) + Environment.NewLine +
+                "OverlayForeground=" + FormatColor(preferences.OverlayForeground) + Environment.NewLine +
+                "OverlayFontName=" + preferences.OverlayFontName + Environment.NewLine +
+                "OverlayFontSize=" + preferences.OverlayFontSize.ToString("R", CultureInfo.InvariantCulture) + Environment.NewLine +
+                "OverlayFontBold=" + preferences.OverlayFontBold + Environment.NewLine +
+                "OverlayAutoSize=" + preferences.OverlayAutoSize + Environment.NewLine +
+                "OverlayWidth=" + preferences.OverlayWidth.ToString(CultureInfo.InvariantCulture) + Environment.NewLine +
+                "OverlayHeight=" + preferences.OverlayHeight.ToString(CultureInfo.InvariantCulture) + Environment.NewLine;
             try
             {
                 File.WriteAllText(temporary, text, new UTF8Encoding(false));
@@ -56,6 +96,44 @@ namespace MonitorGate
                 else File.Move(temporary, path);
             }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
+
+        private static bool TryParseColor(string value, out Color color)
+        {
+            color = Color.Empty;
+            int rgb;
+            if (value.Length != 7 || value[0] != '#' || !Int32.TryParse(value.Substring(1),
+                NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out rgb)) return false;
+            color = Color.FromArgb((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+            return true;
+        }
+
+        private static void ValidateColor(Color color)
+        {
+            if (color.IsEmpty || color.A != 255)
+                throw new ArgumentException("상태 박스 색상은 불투명한 RGB 색상이어야 합니다.");
+        }
+
+        private static string FormatColor(Color color)
+        {
+            return String.Format(CultureInfo.InvariantCulture, "#{0:X2}{1:X2}{2:X2}", color.R, color.G, color.B);
+        }
+
+        private static bool IsValidFontName(string name)
+        {
+            if (String.IsNullOrWhiteSpace(name) || name.Length > 128 || name != name.Trim()) return false;
+            return !HasControl(name);
+        }
+
+        private static bool HasControl(string value)
+        {
+            foreach (char character in value) if (Char.IsControl(character)) return true;
+            return false;
+        }
+
+        private static bool IsValidFontSize(float size)
+        {
+            return !Single.IsNaN(size) && !Single.IsInfinity(size) && size >= 6 && size <= 48;
         }
     }
 

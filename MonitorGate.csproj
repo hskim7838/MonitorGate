@@ -7,6 +7,7 @@
     <RootNamespace>MonitorGate</RootNamespace>
     <AssemblyName>MonitorGate</AssemblyName>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <PlatformTarget>AnyCPU</PlatformTarget>
     <LangVersion>5</LangVersion>
     <OutputPath>bin\$(Configuration)\</OutputPath>
@@ -25,9 +26,11 @@
     <Compile Include="MonitorGate.cs" />
     <Compile Include="StartupSettings.cs" />
     <Compile Include="SettingsDialog.cs" />
+    <Compile Include="OverlayAppearance.cs" />
     <None Include="MonitorGate.manifest" />
     <None Include="MonitorGate.exe.config" />
     <None Include="README.md" />
+    <None Include="README.ko.md" />
     <None Include="Build.ps1" />
     <None Include="Verify.ps1" />
     <None Include="Tests.cs" />
